@@ -1,0 +1,75 @@
+name: Deploy
+
+# Deploys (or updates) the vps-runner stack on your VPS over SSH.
+# The .env on the VPS is re-rendered from repo secrets/variables every run,
+# so GitHub remains the single source of truth.
+#
+# Required:
+#   secrets: RUNNER_GITHUB_PAT, VPS_SSH_KEY, VPS_SSH_HOST, VPS_SSH_USER
+#   variables: RUNNER_REPOS  (allow-list: "owner/repo[,owner2/repo2]")
+# Optional secrets:  VPS_SSH_PORT, STATUS_TOKEN
+# Optional variables: MAX_RUNNERS, MIN_RUNNERS, RUNNER_MEMORY_GB, RUNNER_LABELS,
+#                     MOUNT_DOCKER_SOCK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VPS_SSH_HOST: ${{ secrets.VPS_SSH_HOST }}
+      VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
+      VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      GITHUB_PAT: ${{ secrets.RUNNER_GITHUB_PAT }}
+      STATUS_TOKEN: ${{ secrets.STATUS_TOKEN }}
+      RUNNER_REPOS: ${{ vars.RUNNER_REPOS }}
+      MAX_RUNNERS: ${{ vars.MAX_RUNNERS }}
+      MIN_RUNNERS: ${{ vars.MIN_RUNNERS }}
+      RUNNER_MEMORY_GB: ${{ vars.RUNNER_MEMORY_GB }}
+      RUNNER_LABELS: ${{ vars.RUNNER_LABELS }}
+      MOUNT_DOCKER_SOCK: ${{ vars.MOUNT_DOCKER_SOCK }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight - required secrets/variables
+        run: |
+          missing=0
+          for pair in \
+            "secret:RUNNER_GITHUB_PAT" \
+            "secret:VPS_SSH_KEY" \
+            "secret:VPS_SSH_HOST" \
+            "secret:VPS_SSH_USER" \
+            "variable:RUNNER_REPOS"; do
+            kind="${pair%%:*}"; name="${pair##*:}"
+            if [ "${kind}" = "secret" ]; then
+              val="$(printenv "${name}" || true)"
+            else
+              val="$(printenv "${name}" || true)"
+            fi
+            if [ -z "${val}" ]; then
+              echo "::error title=missing ${kind}::${name} is not set"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Deploy to VPS
+        run: bash scripts/ci_deploy.sh
+
+      - name: Summary
+        run: |
+          {
+            echo "## Deploy summary"
+            echo
+            echo "- host: \`${VPS_SSH_USER}@\${VPS_SSH_HOST}\` (target: /opt/vps-runner)"
+            echo "- allow-list: \`${RUNNER_REPOS}\`"
+            echo "- pool: ${MIN_RUNNERS:-0} - ${MAX_RUNNERS:-2} runners, ${RUNNER_MEMORY_GB:-2.5} GB each"
+            echo "- label: \`runs-on: [self-hosted, ${RUNNER_LABELS:-vps}]\` in your workflows"
+            echo
+            echo "Status page: \`ssh -N -L 8080:localhost:8080 ${VPS_SSH_USER}@\${VPS_SSH_HOST}\` then http://127.0.0.1:8080"
+          } >> "$GITHUB_STEP_SUMMARY"

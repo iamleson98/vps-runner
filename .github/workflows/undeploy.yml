@@ -1,0 +1,79 @@
+name: Undeploy (clean removal)
+
+# Removes the vps-runner stack from the VPS cleanly:
+#   1. deregisters all our runners from every allow-listed repo (GitHub side)
+#   2. stops/removes controller + runner containers, images, volumes
+#   3. removes the systemd unit; with --purge also deletes /opt/vps-runner
+#
+# Requires the same SSH secrets as Deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      purge:
+        description: "Also delete /opt/vps-runner (repo checkout + .env)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  undeploy:
+    runs-on: ubuntu-latest
+    env:
+      VPS_SSH_HOST: ${{ secrets.VPS_SSH_HOST }}
+      VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
+      VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight - SSH secrets
+        run: |
+          missing=0
+          for name in VPS_SSH_KEY VPS_SSH_HOST VPS_SSH_USER; do
+            if [ -z "$(printenv "${name}")" ]; then
+              echo "::error title=missing secret::${name} is not set"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Run uninstall.sh on the VPS
+        run: |
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          PURGE_FLAG=""
+          if [ "${{ inputs.purge }}" = "true" ]; then PURGE_FLAG="--purge"; fi
+          ssh -i "$KEY_FILE" -p "${VPS_SSH_PORT:-22}" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+            "${VPS_SSH_USER}@${VPS_SSH_HOST}" \
+            "cd /opt/vps-runner && sudo -n bash deploy/uninstall.sh ${PURGE_FLAG}"
+
+      - name: Verify nothing is left behind
+        run: |
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          LEFT=$(ssh -i "$KEY_FILE" -p "${VPS_SSH_PORT:-22}" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+            "${VPS_SSH_USER}@${VPS_SSH_HOST}" \
+            'docker ps -aq --filter label=vps-runner.managed=1 | wc -l; systemctl is-active vps-runner.service 2>/dev/null | grep -c "^active$" || true' \
+            | paste -sd/ -)
+          CONTAINERS="${LEFT%%/*}"
+          ACTIVE="${LEFT##*/}"
+          {
+            echo "## Undeploy summary"
+            echo
+            echo "- managed runner containers left: ${CONTAINERS}"
+            echo "- vps-runner.service active: ${ACTIVE}"
+            echo "- purged checkout: ${{ inputs.purge }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${CONTAINERS}" != "0" ]; then
+            echo "::error title=leftovers::managed runner containers still present on the VPS"
+            exit 1
+          fi

@@ -1,0 +1,73 @@
+name: Bootstrap deploy key
+
+# One-time setup step: generates a dedicated SSH deploy keypair for CI.
+#   * the PRIVATE key is stored automatically as repo secret VPS_SSH_KEY
+#     (uses RUNNER_GITHUB_PAT via gh CLI)
+#   * the PUBLIC key is printed - paste it into the VPS:
+#       ~/.ssh/authorized_keys
+#
+# Run this FIRST, before the Deploy workflow.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate-key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PAT is configured
+        env:
+          PAT: ${{ secrets.RUNNER_GITHUB_PAT }}
+        run: |
+          [ -n "$PAT" ] || { echo "::error title=missing secret::RUNNER_GITHUB_PAT is not set. Add it first (Settings > Secrets and variables > Actions)."; exit 1; }
+
+      - name: Generate ed25519 deploy keypair
+        run: |
+          rm -f /tmp/id_ed25519 /tmp/id_ed25519.pub
+          ssh-keygen -t ed25519 -N "" -C "vps-runner-deploy@github-actions" -f /tmp/id_ed25519
+          echo "PUB_KEY<<EOF" >> "$GITHUB_ENV"
+          cat /tmp/id_ed25519.pub >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+
+      - name: Save private key as repo secret VPS_SSH_KEY
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_GITHUB_PAT }}
+        run: |
+          if command -v gh >/dev/null && gh secret set VPS_SSH_KEY --repo "${GITHUB_REPOSITORY}" < /tmp/id_ed25519; then
+            echo "secret_saved=true" >> "$GITHUB_ENV"
+          else
+            echo "secret_saved=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload private key as 1-day artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-deploy-private-key
+          path: /tmp/id_ed25519
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Instructions
+        env:
+          SECRET_SAVED: ${{ env.secret_saved }}
+        run: |
+          {
+            echo "## Deploy key generated"
+            echo
+            echo "1. Add this **public key** to the VPS (append to \`~/.ssh/authorized_keys\` of the CI SSH user):"
+            echo '   ```'
+            cat /tmp/id_ed25519.pub
+            echo '   ```'
+            echo
+            if [ "$SECRET_SAVED" = "true" ]; then
+              echo "2. Private key was **saved automatically** as repo secret \`VPS_SSH_KEY\`."
+            else
+              echo "2. **Manual step**: download the artifact \`vps-deploy-private-key\` and add its contents as repo secret \`VPS_SSH_KEY\` (the automatic save failed - likely PAT scope)."
+            fi
+            echo "3. Add secrets \`VPS_SSH_HOST\` and \`VPS_SSH_USER\` (and optional \`VPS_SSH_PORT\`)."
+            echo "4. Set the repo variable \`RUNNER_REPOS\` to your allow-list, e.g. \`iamleson98/my-repo,iamleson98/other-repo\`."
+            echo "5. Run the **Deploy** workflow."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,28 @@
+# Example workflow that runs on the self-hosted VPS runners.
+# Put this in any allow-listed repository.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    # 'self-hosted' is automatic; 'vps' is the custom label configured in
+    # .env / RUNNER_LABELS on the runner controller.
+    runs-on: [self-hosted, vps]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show the runner
+        run: |
+          echo "running on: $(uname -a)"
+          echo "cpus: $(nproc)"
+          free -h | head -2
+      - name: Install deps & test (example)
+        run: |
+          # apt is available (runner user has passwordless sudo)
+          sudo apt-get update -qq && sudo apt-get install -y -qq tree >/dev/null
+          tree -L 2 .
+      - name: Docker-in-CI works too (sibling builds)
+        run: docker version && docker run --rm alpine:3.20 echo "hello from sibling container"
